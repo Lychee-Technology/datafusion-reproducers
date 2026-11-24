@@ -374,9 +374,15 @@ ensure_rust_components() {
         missing+=("clippy")
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
-        if command -v rustup >/dev/null 2>&1; then
-            echo "Installing missing rustup components: ${missing[*]}"
-            rustup component add "${missing[@]}"
+        if [[ "${CI:-}" == "true" || "${CI:-}" == "1" ]]; then
+            if command -v rustup >/dev/null 2>&1; then
+                echo "Installing missing rustup components: ${missing[*]}"
+                rustup component add "${missing[@]}"
+            else
+                fail "Missing Cargo components (${missing[*]}) and rustup is not available"
+            fi
+        elif command -v rustup >/dev/null 2>&1; then
+            fail "Missing Cargo components (${missing[*]}). Install them with: rustup component add ${missing[*]}"
         else
             fail "Missing Cargo components (${missing[*]}) and rustup is not available"
         fi

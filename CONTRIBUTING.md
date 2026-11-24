@@ -74,7 +74,7 @@ To also verify release compilation for cases:
 ./scripts/check-cases.sh --release
 ```
 
-CI runs `./scripts/check-cases.sh` automatically on pushes to `main` and pull requests. It checks:
+CI runs `./scripts/check-cases.sh` automatically on pushes to `main` and pull requests. Local runs require `rustfmt` and `clippy` to be installed for the active toolchain (when missing locally, the script prints the `rustup component add` command and fails rather than modifying your toolchain; in CI with `CI=true`, missing components are installed automatically). It checks:
 
 - Repository invariants (no root `Cargo.toml`, valid Apache-2.0 `LICENSE`, `.gitignore` excludes `target/` while tracking `Cargo.lock`).
 - Per-case metadata (`README.md`, every `Cargo.toml` under the case excluding `target/` resolving `publish = false` and `license = "Apache-2.0"`, and a committed `Cargo.lock` for each standalone manifest or case-internal workspace root).

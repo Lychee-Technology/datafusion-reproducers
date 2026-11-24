@@ -89,12 +89,16 @@ fi
 pass "Root LICENSE verified as Apache-2.0"
 
 if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    if git -C "$REPO_ROOT" check-ignore -q "repros/_probe/Cargo.lock"; then
-        fail ".gitignore must not ignore repros/<case-slug>/Cargo.lock"
-    fi
-    if ! git -C "$REPO_ROOT" check-ignore -q "repros/_probe/target/debug/probe"; then
-        fail ".gitignore must ignore repros/<case-slug>/target/ build artifacts"
-    fi
+    for lock_probe in "repros/_probe/Cargo.lock" "repros/_probe/nested/Cargo.lock"; do
+        if git -C "$REPO_ROOT" check-ignore -q "$lock_probe"; then
+            fail ".gitignore must not ignore $lock_probe"
+        fi
+    done
+    for target_probe in "repros/_probe/target/debug/probe" "repros/_probe/nested/target/debug/probe"; do
+        if ! git -C "$REPO_ROOT" check-ignore -q "$target_probe"; then
+            fail ".gitignore must ignore $target_probe build artifacts"
+        fi
+    done
     pass ".gitignore tracks per-case Cargo.lock and ignores target/ artifacts"
 else
     warn "Skipping git check-ignore verification ($REPO_ROOT is not a Git work tree)"
@@ -141,40 +145,223 @@ if [[ "$metadata_only" == false ]] && ! command -v cargo >/dev/null 2>&1; then
 fi
 
 # 4. Per-case checks
-validate_manifest() {
-    local manifest_path="$1"
-    python3 - "$manifest_path" <<'PY'
+inspect_case_manifests() {
+    local case_dir="$1"
+    local case_name="$2"
+    python3 - "$case_dir" "$case_name" <<'PY'
+import os
+from pathlib import Path
 import sys
 import tomllib
 
-manifest_path = sys.argv[1]
-try:
-    with open(manifest_path, "rb") as f:
-        data = tomllib.load(f)
-except Exception as exc:
-    print(f"Failed to parse {manifest_path}: {exc}", file=sys.stderr)
-    sys.exit(1)
+case_dir = Path(sys.argv[1]).resolve()
+case_name = sys.argv[2]
 
-pkg = data.get("package")
-if not isinstance(pkg, dict):
-    print(f"Missing [package] table in {manifest_path}", file=sys.stderr)
-    sys.exit(1)
-
-publish = pkg.get("publish")
-if publish is not False:
-    print(
-        f"{manifest_path}: [package].publish must be explicitly set to false (found {publish!r})",
-        file=sys.stderr,
+manifest_paths = []
+for root, dirs, files in os.walk(case_dir, topdown=True):
+    dirs[:] = sorted(
+        d for d in dirs
+        if d not in {"target", ".git"} and not d.startswith("mutants.out")
     )
+    if "Cargo.toml" in files:
+        manifest_paths.append((Path(root) / "Cargo.toml").resolve())
+
+manifest_paths.sort()
+if not manifest_paths:
+    print(f"Case '{case_name}' contains no Cargo.toml files under {case_dir}", file=sys.stderr)
     sys.exit(1)
 
-license_val = pkg.get("license")
-if license_val != "Apache-2.0":
-    print(
-        f"{manifest_path}: [package].license must be \"Apache-2.0\" (found {license_val!r})",
-        file=sys.stderr,
+manifests = {}
+for mpath in manifest_paths:
+    try:
+        with open(mpath, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        print(f"Failed to parse {mpath}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data.get("package"), dict) and not isinstance(data.get("workspace"), dict):
+        print(f"{mpath}: must define [package] and/or [workspace]", file=sys.stderr)
+        sys.exit(1)
+    manifests[mpath.parent] = data
+
+workspace_roots = {
+    mdir for mdir, data in manifests.items()
+    if isinstance(data.get("workspace"), dict)
+}
+
+
+def expand_patterns(ws_dir: Path, patterns) -> list[Path]:
+    matched = []
+    if not isinstance(patterns, list):
+        return matched
+    for raw in patterns:
+        if not isinstance(raw, str) or not raw:
+            continue
+        pat = raw.rstrip("/")
+        if not pat:
+            matched.append(ws_dir)
+            continue
+        try:
+            for p in ws_dir.glob(pat):
+                if p.is_dir():
+                    matched.append(p.resolve())
+        except Exception:
+            pass
+        literal = (ws_dir / pat).resolve()
+        if literal.is_dir():
+            matched.append(literal)
+    return matched
+
+
+ws_members_cache = {}
+ws_excludes_cache = {}
+for wdir in workspace_roots:
+    ws_table = manifests[wdir]["workspace"]
+    ws_members_cache[wdir] = set(expand_patterns(wdir, ws_table.get("members", [])))
+    ws_excludes_cache[wdir] = set(expand_patterns(wdir, ws_table.get("exclude", [])))
+
+
+def is_excluded(mdir: Path, wdir: Path) -> bool:
+    for excl in ws_excludes_cache[wdir]:
+        if mdir == excl or excl in mdir.parents:
+            return True
+    return False
+
+
+classifications = {}
+member_counts = {wdir: 0 for wdir in workspace_roots}
+
+for mdir, data in manifests.items():
+    if mdir in workspace_roots:
+        classifications[mdir] = ("workspace", mdir)
+        continue
+
+    pkg = data.get("package")
+    if isinstance(pkg, dict) and "workspace" in pkg:
+        ws_rel = pkg["workspace"]
+        if not isinstance(ws_rel, str):
+            print(f"{mdir / 'Cargo.toml'}: [package].workspace must be a string path", file=sys.stderr)
+            sys.exit(1)
+        target_ws = (mdir / ws_rel).resolve()
+        if target_ws not in workspace_roots or (target_ws != case_dir and case_dir not in target_ws.parents):
+            print(
+                f"{mdir / 'Cargo.toml'}: [package].workspace points outside case or to non-workspace ({target_ws})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        classifications[mdir] = ("member", target_ws)
+        member_counts[target_ws] += 1
+        continue
+
+    owner = None
+    # Nearest enclosing workspace ancestor wins if nested workspaces exist.
+    ancestors = sorted(
+        (w for w in workspace_roots if w in mdir.parents),
+        key=lambda p: len(p.parts),
+        reverse=True,
     )
-    sys.exit(1)
+    for wdir in ancestors:
+        if is_excluded(mdir, wdir):
+            continue
+        if mdir in ws_members_cache[wdir]:
+            owner = wdir
+            break
+
+    if owner is not None:
+        classifications[mdir] = ("member", owner)
+        member_counts[owner] += 1
+    else:
+        classifications[mdir] = ("standalone", None)
+
+for wdir in sorted(workspace_roots):
+    ws_table = manifests[wdir]["workspace"]
+    has_pkg = isinstance(manifests[wdir].get("package"), dict)
+    if not has_pkg:
+        members_cfg = ws_table.get("members")
+        if not isinstance(members_cfg, list) or not members_cfg or member_counts[wdir] == 0:
+            print(
+                f"{wdir / 'Cargo.toml'}: virtual [workspace] must declare non-empty members matching at least one discovered member crate",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def resolve_pkg_field(mdir: Path, field: str):
+    pkg = manifests[mdir]["package"]
+    val = pkg.get(field)
+    if isinstance(val, dict) and val.get("workspace") is True:
+        kind, owner = classifications[mdir]
+        ws_dir = mdir if kind == "workspace" else owner
+        if ws_dir is None:
+            print(
+                f"{mdir / 'Cargo.toml'}: [package].{field}.workspace = true used without an owning [workspace]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        ws_pkg = manifests[ws_dir]["workspace"].get("package")
+        if not isinstance(ws_pkg, dict):
+            print(
+                f"{mdir / 'Cargo.toml'}: [package].{field}.workspace = true requires [workspace.package] in {ws_dir / 'Cargo.toml'}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return ws_pkg.get(field)
+    return val
+
+
+def has_toolchain_in_ancestors(mdir: Path) -> bool:
+    cur = mdir
+    while True:
+        if (cur / "rust-toolchain.toml").is_file():
+            return True
+        if cur == case_dir or cur.parent == cur:
+            break
+        cur = cur.parent
+    return False
+
+
+root_manifests = []
+for mdir in sorted(manifests):
+    data = manifests[mdir]
+    mpath = mdir / "Cargo.toml"
+    if isinstance(data.get("package"), dict):
+        publish = resolve_pkg_field(mdir, "publish")
+        if publish is not False:
+            print(
+                f"{mpath}: [package].publish must resolve to false (found {publish!r})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        license_val = resolve_pkg_field(mdir, "license")
+        if license_val != "Apache-2.0":
+            print(
+                f"{mpath}: [package].license must resolve to \"Apache-2.0\" (found {license_val!r})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    kind, _ = classifications[mdir]
+    if kind in {"standalone", "workspace"}:
+        if not (mdir / "Cargo.lock").is_file():
+            rel = mdir.relative_to(case_dir)
+            loc = "Cargo.lock" if rel == Path(".") else f"{rel}/Cargo.lock"
+            print(
+                f"Case '{case_name}' is missing required lockfile: {loc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not has_toolchain_in_ancestors(mdir):
+            rel = mdir.relative_to(case_dir)
+            label = case_name if rel == Path(".") else f"{case_name}/{rel}"
+            print(
+                f"[WARN] Case '{label}' has no rust-toolchain.toml; ensure toolchain is documented in README.md",
+                file=sys.stderr,
+            )
+        root_manifests.append((kind, str(mdir)))
+
+for kind, mdir_str in root_manifests:
+    sys.stdout.buffer.write(kind.encode("utf-8") + b"\0" + mdir_str.encode("utf-8") + b"\0")
 PY
 }
 
@@ -196,35 +383,56 @@ ensure_rust_components() {
     fi
 }
 
+manifest_list_file="$(mktemp)"
+cleanup_manifest_list() {
+    rm -f "$manifest_list_file"
+}
+trap cleanup_manifest_list EXIT
+
 for case_dir in "${cases[@]}"; do
     case_name="$(basename "$case_dir")"
     echo "Checking case: $case_name ($case_dir)"
 
-    for req_file in Cargo.toml Cargo.lock README.md; do
-        if [[ ! -f "$case_dir/$req_file" ]]; then
-            fail "Case '$case_name' is missing required file: $req_file"
-        fi
-    done
-
-    if [[ ! -f "$case_dir/rust-toolchain.toml" ]]; then
-        warn "Case '$case_name' has no rust-toolchain.toml; ensure toolchain is documented in README.md"
+    if [[ ! -f "$case_dir/README.md" ]]; then
+        fail "Case '$case_name' is missing required file: README.md"
     fi
 
-    validate_manifest "$case_dir/Cargo.toml"
-    pass "Case '$case_name' metadata verified (publish = false, license = Apache-2.0, Cargo.lock, README.md)"
+    inspect_case_manifests "$case_dir" "$case_name" > "$manifest_list_file"
+
+    root_entries=()
+    while IFS= read -r -d '' kind && IFS= read -r -d '' mdir; do
+        root_entries+=("$kind" "$mdir")
+    done < "$manifest_list_file"
+
+    root_count=$(( ${#root_entries[@]} / 2 ))
+    pass "Case '$case_name' metadata verified ($root_count root manifest(s), all nested Cargo.toml compliant: publish = false, license = Apache-2.0, Cargo.lock, README.md)"
 
     if [[ "$metadata_only" == false ]]; then
-        (
-            cd "$case_dir"
-            ensure_rust_components
-            cargo fmt --check
-            cargo clippy --locked --all-targets -- -D warnings
-            cargo test --locked
-            if [[ "$run_release" == true ]]; then
-                cargo build --release --locked
-            fi
-        )
-        pass "Case '$case_name' Rust checks passed"
+        for ((i = 0; i < ${#root_entries[@]}; i += 2)); do
+            kind="${root_entries[i]}"
+            mdir="${root_entries[i + 1]}"
+            echo "Running Cargo checks ($kind): $mdir"
+            (
+                cd "$mdir"
+                ensure_rust_components
+                if [[ "$kind" == "workspace" ]]; then
+                    cargo fmt --all --check
+                    cargo clippy --workspace --locked --all-targets -- -D warnings
+                    cargo test --workspace --locked
+                    if [[ "$run_release" == true ]]; then
+                        cargo build --workspace --release --locked
+                    fi
+                else
+                    cargo fmt --check
+                    cargo clippy --locked --all-targets -- -D warnings
+                    cargo test --locked
+                    if [[ "$run_release" == true ]]; then
+                        cargo build --release --locked
+                    fi
+                fi
+            )
+        done
+        pass "Case '$case_name' Rust checks passed ($root_count root manifest(s))"
     fi
 done
 

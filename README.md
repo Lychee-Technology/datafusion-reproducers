@@ -26,7 +26,8 @@ No reproduction cases are committed yet. Each new case added under `repros/<case
 ├── repros/                         # Independent per-case Cargo projects (created when cases are added)
 │   └── <case-slug>/
 └── scripts/
-    └── check-cases.sh              # Local and CI repository/case convention checks
+    ├── check-cases.sh              # Local and CI repository/case convention checks
+    └── test-check-cases.sh         # Offline self-test suite for check-cases.sh
 ```
 
 There is intentionally no root `Cargo.toml` or shared Cargo workspace. Each directory under `repros/<case-slug>/` owns its own `Cargo.toml`, `Cargo.lock`, toolchain configuration, and DataFusion dependency pins so adding or updating one case never alters another case's dependencies.

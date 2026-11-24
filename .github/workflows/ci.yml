@@ -26,7 +26,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check script syntax
-        run: bash -n scripts/check-cases.sh
+        run: bash -n scripts/check-cases.sh scripts/test-check-cases.sh
+
+      - name: Run check-cases self-tests
+        run: ./scripts/test-check-cases.sh
 
       - name: Run repository and case checks
         run: ./scripts/check-cases.sh

@@ -149,6 +149,7 @@ inspect_case_manifests() {
     local case_dir="$1"
     local case_name="$2"
     python3 - "$case_dir" "$case_name" <<'PY'
+from collections import defaultdict, deque
 import os
 from pathlib import Path
 import sys
@@ -228,9 +229,64 @@ def is_excluded(mdir: Path, wdir: Path) -> bool:
     return False
 
 
+def iter_dep_entries(data: dict):
+    for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+        table = data.get(section)
+        if isinstance(table, dict):
+            yield from table.items()
+    target_table = data.get("target")
+    if isinstance(target_table, dict):
+        for cfg_table in target_table.values():
+            if not isinstance(cfg_table, dict):
+                continue
+            for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+                table = cfg_table.get(section)
+                if isinstance(table, dict):
+                    yield from table.items()
+
+
+def iter_direct_path_deps(mdir: Path, data: dict) -> list[Path]:
+    paths = []
+    for _, spec in iter_dep_entries(data):
+        if isinstance(spec, dict) and isinstance(spec.get("path"), str) and spec["path"]:
+            paths.append((mdir / spec["path"]).resolve())
+    patch_table = data.get("patch")
+    if isinstance(patch_table, dict):
+        for src_table in patch_table.values():
+            if not isinstance(src_table, dict):
+                continue
+            for spec in src_table.values():
+                if isinstance(spec, dict) and isinstance(spec.get("path"), str) and spec["path"]:
+                    paths.append((mdir / spec["path"]).resolve())
+    return paths
+
+
+def iter_workspace_inherited_path_deps(mdir: Path, wdir: Path) -> list[Path]:
+    ws_deps = manifests[wdir]["workspace"].get("dependencies")
+    if not isinstance(ws_deps, dict):
+        return []
+    paths = []
+    for dep_key, dep_spec in iter_dep_entries(manifests[mdir]):
+        if isinstance(dep_spec, dict) and dep_spec.get("workspace") is True:
+            ws_spec = ws_deps.get(dep_key)
+            if isinstance(ws_spec, dict) and isinstance(ws_spec.get("path"), str) and ws_spec["path"]:
+                paths.append((wdir / ws_spec["path"]).resolve())
+    return paths
+
+
+def nearest_enclosing_workspace(mdir: Path) -> Path | None:
+    ancestors = sorted(
+        (w for w in workspace_roots if w in mdir.parents),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+    return ancestors[0] if ancestors else None
+
+
 classifications = {}
 member_counts = {wdir: 0 for wdir in workspace_roots}
 
+# Phase 1a: explicit workspace roots and explicit workspace members.
 for mdir, data in manifests.items():
     if mdir in workspace_roots:
         classifications[mdir] = ("workspace", mdir)
@@ -270,8 +326,87 @@ for mdir, data in manifests.items():
     if owner is not None:
         classifications[mdir] = ("member", owner)
         member_counts[owner] += 1
-    else:
-        classifications[mdir] = ("standalone", None)
+
+# Phase 1b: implicit workspace members reached via path dependencies inside a workspace.
+for wdir in sorted(workspace_roots):
+    queue = deque()
+    for mdir in sorted(manifests):
+        entry = classifications.get(mdir)
+        if entry == ("workspace", wdir) and isinstance(manifests[wdir].get("package"), dict):
+            queue.append(mdir)
+        elif entry == ("member", wdir):
+            queue.append(mdir)
+
+    while queue:
+        cur = queue.popleft()
+        deps = iter_direct_path_deps(cur, manifests[cur]) + iter_workspace_inherited_path_deps(cur, wdir)
+        for dep_dir in deps:
+            if (
+                dep_dir in manifests
+                and dep_dir not in workspace_roots
+                and dep_dir not in classifications
+                and nearest_enclosing_workspace(dep_dir) == wdir
+                and not is_excluded(dep_dir, wdir)
+            ):
+                classifications[dep_dir] = ("member", wdir)
+                member_counts[wdir] += 1
+                queue.append(dep_dir)
+
+# Phase 2: classify remaining manifests into standalone roots vs. non-workspace path-dep helpers.
+remaining = sorted(mdir for mdir in manifests if mdir not in classifications)
+remaining_set = set(remaining)
+incoming = defaultdict(set)
+outgoing = defaultdict(set)
+reached_from_workspace = set()
+
+for mdir, data in manifests.items():
+    deps = list(iter_direct_path_deps(mdir, data))
+    if mdir in classifications:
+        kind, owner = classifications[mdir]
+        ws_dir = mdir if kind == "workspace" else owner
+        if ws_dir is not None:
+            deps.extend(iter_workspace_inherited_path_deps(mdir, ws_dir))
+    for dep_dir in deps:
+        if dep_dir != mdir and dep_dir in remaining_set:
+            incoming[dep_dir].add(mdir)
+            if mdir in remaining_set:
+                outgoing[mdir].add(dep_dir)
+            else:
+                reached_from_workspace.add(dep_dir)
+
+
+def mark_reachable_as_path_dep(seeds, protected_roots: set[Path]):
+    q = deque(seeds)
+    while q:
+        cur = q.popleft()
+        if cur in protected_roots or cur in classifications:
+            continue
+        classifications[cur] = ("path-dep", None)
+        for nxt in sorted(outgoing[cur]):
+            if nxt not in protected_roots and nxt not in classifications:
+                q.append(nxt)
+
+
+mark_reachable_as_path_dep(sorted(reached_from_workspace), set())
+
+root_seeds = [m for m in remaining if m not in classifications and not incoming[m]]
+standalone_roots = set(root_seeds)
+for m in root_seeds:
+    classifications[m] = ("standalone", None)
+direct_targets = sorted({nxt for m in root_seeds for nxt in outgoing[m]})
+mark_reachable_as_path_dep(direct_targets, standalone_roots)
+
+while True:
+    unclassified = [m for m in remaining if m not in classifications]
+    if not unclassified:
+        break
+    chosen = min(
+        unclassified,
+        key=lambda m: (0 if (m / "Cargo.lock").is_file() else 1, len(m.parts), str(m)),
+    )
+    classifications[chosen] = ("standalone", None)
+    standalone_roots.add(chosen)
+    mark_reachable_as_path_dep(sorted(outgoing[chosen]), standalone_roots)
 
 for wdir in sorted(workspace_roots):
     ws_table = manifests[wdir]["workspace"]

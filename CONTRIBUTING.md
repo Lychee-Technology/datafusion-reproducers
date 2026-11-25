@@ -35,13 +35,13 @@ Create optional directories only when needed.
 ### Isolation and Dependency Rules
 
 - **No root workspace:** Do not add a root `Cargo.toml` or share a single DataFusion version across cases. Adding or updating one case must never modify another case's `Cargo.lock`.
-- **No crates.io publication:** Every `Cargo.toml` under a case directory (including nested version-comparison manifests and workspace members) must resolve to:
+- **No crates.io publication:** Every `Cargo.toml` under a case directory (including nested version-comparison manifests, explicit or implicit workspace members, and local path-dependency helper crates) must resolve to:
   ```toml
   [package]
   publish = false
   license = "Apache-2.0"
   ```
-  Every standalone manifest or case-internal workspace root must commit its own `Cargo.lock`.
+  Every standalone root manifest or case-internal workspace root must commit its own `Cargo.lock` (workspace members and local path-dependency helper crates resolve through their owning root's `Cargo.lock`).
 - **Exact DataFusion pins:** Pin published releases with `=x.y.z` (for example `datafusion = "=56.0.0"`) and Git revisions with a full commit SHA (`rev = "<40-char-sha>"`).
 - **Standalone inputs:** Use generated data, `MemTable`, `EmptyTable`, inline SQL, or direct logical/physical plan construction. Do not depend on downstream applications or external services.
 - **Safe defaults:** Default CLI flags and `cargo test` cases must run quickly and safely. Require explicit flags for heavy or extended workloads, and never add brittle wall-clock timing assertions (`assert!(elapsed < ...)`) to routine tests or CI.
@@ -77,8 +77,8 @@ To also verify release compilation for cases:
 CI runs `./scripts/check-cases.sh` automatically on pushes to `main` and pull requests. Local runs require `rustfmt` and `clippy` to be installed for the active toolchain (when missing locally, the script prints the `rustup component add` command and fails rather than modifying your toolchain; in CI with `CI=true`, missing components are installed automatically). It checks:
 
 - Repository invariants (no root `Cargo.toml`, valid Apache-2.0 `LICENSE`, `.gitignore` excludes `target/` while tracking `Cargo.lock`).
-- Per-case metadata (`README.md`, every `Cargo.toml` under the case excluding `target/` resolving `publish = false` and `license = "Apache-2.0"`, and a committed `Cargo.lock` for each standalone manifest or case-internal workspace root).
-- Per-case Rust checks when cases exist (`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked` for each standalone manifest, and `--all` / `--workspace` for case-internal workspaces).
+- Per-case metadata (`README.md`, every `Cargo.toml` under the case excluding `target/` resolving `publish = false` and `license = "Apache-2.0"`, and a committed `Cargo.lock` for each standalone root manifest or case-internal workspace root, not explicit/implicit workspace members or path-dependency helper crates).
+- Per-case Rust checks when cases exist (`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked` for each standalone root manifest, and `--all` / `--workspace` for case-internal workspaces).
 
 Before submitting a PR:
 

@@ -6,11 +6,11 @@ Standalone reproducible cases, correctness controls, cross-version baselines, an
 
 ## Case Index
 
-No reproduction cases are committed yet. Each new case added under `repros/<case-slug>/` must add a row here.
+Each new case added under `repros/<case-slug>/` must add a row here.
 
 | Case | Symptom | Affected Versions | Status | Upstream |
 |---|---|---|---|---|
-| *(none yet)* | — | — | — | — |
+| [`deep-expression-planning`](repros/deep-expression-planning/README.md) | Physical planning of `DISTINCT` / `GROUP BY` / `ORDER BY` on a deeply nested computed column grows steeply with depth | 56.0.0 (55.0.0 not affected) | Reproduced | Not yet reported |
 
 ## Repository Structure
 

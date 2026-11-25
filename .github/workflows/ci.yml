@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Repository and Case Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check script syntax
+        run: bash -n scripts/check-cases.sh scripts/test-check-cases.sh
+
+      - name: Run check-cases self-tests
+        run: ./scripts/test-check-cases.sh
+
+      - name: Run repository and case checks
+        run: ./scripts/check-cases.sh

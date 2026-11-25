@@ -457,10 +457,34 @@ def has_toolchain_in_ancestors(mdir: Path) -> bool:
     return False
 
 
+def would_adopt_as_implicit_member(root: Path, target: Path) -> bool:
+    # If `root` declared [workspace], Cargo (and Phase 1b) would adopt every crate reachable
+    # from it through path dependencies that live in its directory with no closer workspace
+    # root in between. Dependents outside `root` do not prevent this.
+    def inside(d: Path) -> bool:
+        return root in d.parents and not any(
+            root in w.parents and w in d.parents for w in workspace_roots
+        )
+
+    seen = {root}
+    q = deque([root])
+    while q:
+        cur = q.popleft()
+        for nxt in sorted(outgoing[cur]):
+            if nxt in seen or not inside(nxt):
+                continue
+            if nxt == target:
+                return True
+            seen.add(nxt)
+            q.append(nxt)
+    return False
+
+
 def helper_remedy(mdir: Path) -> str:
     # Only suggest a remedy that makes this helper a checked crate for its actual layout:
     # an enclosing root's [workspace] adopts a helper only if the helper lives in that
-    # root's directory, is not excluded, and is not also used from outside it.
+    # root's directory, is not excluded, and is reachable from that root through path
+    # dependencies inside its directory.
     own_ws = "give this crate its own [workspace] table and Cargo.lock"
     enclosing = [r for r in standalone_roots | workspace_roots if r in mdir.parents]
     if not enclosing:
@@ -471,8 +495,11 @@ def helper_remedy(mdir: Path) -> str:
         if is_excluded(mdir, nearest):
             return f"Remove it from [workspace].exclude in {rel_root}, or {own_ws}"
         return f"Add it to [workspace].members in {rel_root}, or {own_ws}"
-    if any(d != nearest and nearest not in d.parents for d in incoming[mdir]):
-        return f"Because it is also used from outside {nearest.relative_to(case_dir)}/, {own_ws}"
+    if not would_adopt_as_implicit_member(nearest, mdir):
+        return (
+            f"Because {rel_root} does not reach it through path dependencies in its directory, "
+            f"a [workspace] table there would not adopt it, so {own_ws}"
+        )
     return (
         f"Add a [workspace] table to {rel_root} so this crate becomes an implicit member, "
         f"or {own_ws}"

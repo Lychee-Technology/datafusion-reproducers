@@ -662,6 +662,38 @@ replace_in_file "$r_shared/repros/shared-case/v55/Cargo.toml" 'publish.workspace
 replace_in_file "$r_shared/repros/shared-case/shared/Cargo.toml" 'publish = false' 'publish = true'
 expect_fail "shared path-dependency helper with publish = true" "shared/Cargo.toml: [package].publish must resolve to false (found True)" "$r_shared"
 
+# Layout 1c: a helper inside one root's directory that a sibling root also uses.
+# Adding [workspace] to the enclosing root adopts it even though a sibling depends on it too.
+r_xroot="$TMP_ROOT/repo-xroot"
+init_temp_repo "$r_xroot"
+mkdir -p "$r_xroot/repros/xroot-case"
+printf '# xroot-case\n' >"$r_xroot/repros/xroot-case/README.md"
+write_valid_rust_lib "$r_xroot/repros/xroot-case/a/helper" "helper"
+write_valid_rust_pkg "$r_xroot/repros/xroot-case/a" "xroot-a" "" 'helper = { path = "helper" }'
+write_valid_rust_pkg "$r_xroot/repros/xroot-case/b" "xroot-b" "" 'helper = { path = "../a/helper" }'
+gen_lockfile "$r_xroot/repros/xroot-case/a"
+gen_lockfile "$r_xroot/repros/xroot-case/b"
+expect_fail "helper in one root's directory also used by a sibling" "a/helper/Cargo.toml: path-dependency crate (used by a/Cargo.toml, b/Cargo.toml) is not a member of any workspace" "$r_xroot" --metadata-only
+expect_fail "cross-root helper remedy names the enclosing root" "Add a [workspace] table to a/Cargo.toml so this crate becomes an implicit member" "$r_xroot" --metadata-only
+if grep -Fq "Because" "$TMP_ROOT/last_err.log"; then
+    cat "$TMP_ROOT/last_err.log" >&2
+    fail "Cross-root helper remedy must not claim the enclosing root's [workspace] cannot adopt it"
+fi
+pass "Cross-root helper remedy omits the own-workspace-only reason"
+
+# Following that remedy makes the helper an implicit member of a/ and the case passes
+printf '\n[workspace]\n' >>"$r_xroot/repros/xroot-case/a/Cargo.toml"
+gen_lockfile "$r_xroot/repros/xroot-case/a"
+gen_lockfile "$r_xroot/repros/xroot-case/b"
+run_check "$r_xroot" >/dev/null
+pass "Helper adopted by its enclosing root's [workspace] and also used by a sibling root passes"
+
+# A helper in a root's directory that only a sibling uses is not adopted by that root's [workspace]
+replace_in_file "$r_xroot/repros/xroot-case/a/Cargo.toml" 'helper = { path = "helper" }' ''
+replace_in_file "$r_xroot/repros/xroot-case/a/Cargo.toml" $'\n[workspace]\n' ''
+expect_fail "helper in a root's directory used only by a sibling" "a/helper/Cargo.toml: path-dependency crate (used by b/Cargo.toml) is not a member of any workspace" "$r_xroot" --metadata-only
+expect_fail "sibling-only helper remedy only suggests its own workspace" "Because a/Cargo.toml does not reach it through path dependencies in its directory, a [workspace] table there would not adopt it, so give this crate its own [workspace] table and Cargo.lock" "$r_xroot" --metadata-only
+
 # Dev-dependency cycle between root package with [workspace] (with Cargo.lock) and helper (without Cargo.lock)
 r_cycle="$TMP_ROOT/repo-cycle"
 init_temp_repo "$r_cycle"

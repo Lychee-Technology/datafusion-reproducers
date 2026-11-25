@@ -518,7 +518,7 @@ if [[ ! -f "$shim_log" ]] || ! grep -Fq "component add rustfmt" "$shim_log"; the
 fi
 pass "CI=true run installs missing rustup components"
 
-echo "=== 9. Standalone path-dependency helper crates (Layouts 1a, 1b, cycle) ==="
+echo "=== 9. Path-dependency helper crates of standalone roots (Layouts 1a, 1b, cycle) ==="
 r_helper="$TMP_ROOT/repo-helper"
 init_temp_repo "$r_helper"
 mkdir -p "$r_helper/repros/helper-case/src"
@@ -556,10 +556,54 @@ mod tests {
 }
 EOF
 gen_lockfile "$r_helper/repros/helper-case"
-run_check "$r_helper" >/dev/null
-pass "Standalone package with nested transitive path-dependency helpers (without helper Cargo.lock) passes"
+# cargo fmt/clippy/test skip non-member path dependencies, so helpers outside any workspace are rejected
+expect_fail "non-member path-dependency helper of a standalone root" "helper/Cargo.toml: path-dependency crate (used by Cargo.toml) is not a member of any workspace" "$r_helper"
+expect_fail "non-member path-dependency helper rejected in --metadata-only mode" "helper/Cargo.toml: path-dependency crate (used by Cargo.toml) is not a member of any workspace" "$r_helper" --metadata-only
 
-# Path-dependency helpers still enforce publish = false, license = Apache-2.0, and reject workspace inheritance
+# Declaring [workspace] in the root makes in-directory helpers (and their transitive helpers) implicit members
+printf '\n[workspace]\n' >>"$r_helper/repros/helper-case/Cargo.toml"
+gen_lockfile "$r_helper/repros/helper-case"
+run_check "$r_helper" >/dev/null
+pass "Root package with [workspace] and nested transitive path-dependency helpers (without helper Cargo.lock) passes"
+
+# Helpers that are implicit members are covered by fmt, clippy, and test
+helper_lib="$r_helper/repros/helper-case/helper/src/lib.rs"
+cp "$helper_lib" "$TMP_ROOT/helper_lib.rs.orig"
+printf '// SPDX-License-Identifier: Apache-2.0\npub fn helper_val()->i32{subhelper::sub_val()+1}\n' >"$helper_lib"
+expect_fail "implicit-member helper of a root package with unformatted src/lib.rs" "helper/src/lib.rs" "$r_helper"
+
+cat >"$helper_lib" <<'EOF'
+// SPDX-License-Identifier: Apache-2.0
+
+pub fn helper_val() -> i32 {
+    if 1 == 1 {
+        subhelper::sub_val() + 1
+    } else {
+        0
+    }
+}
+EOF
+expect_fail "implicit-member helper of a root package with clippy warning" "clippy::eq_op" "$r_helper"
+
+cat >"$helper_lib" <<'EOF'
+// SPDX-License-Identifier: Apache-2.0
+
+pub fn helper_val() -> i32 {
+    subhelper::sub_val() + 1
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fails() {
+        assert_eq!(1, 2);
+    }
+}
+EOF
+expect_fail "implicit-member helper of a root package with failing unit test" "tests::fails ... FAILED" "$r_helper"
+cp "$TMP_ROOT/helper_lib.rs.orig" "$helper_lib"
+
+# Path-dependency helpers still enforce publish = false, license = Apache-2.0, and workspace inheritance rules
 replace_in_file "$r_helper/repros/helper-case/helper/Cargo.toml" 'publish = false' 'publish = true'
 expect_fail "path-dependency helper with publish = true" "helper/Cargo.toml: [package].publish must resolve to false (found True)" "$r_helper"
 
@@ -569,9 +613,9 @@ expect_fail "path-dependency helper with license = MIT" 'helper/Cargo.toml: [pac
 
 replace_in_file "$r_helper/repros/helper-case/helper/Cargo.toml" 'license = "MIT"' 'license = "Apache-2.0"'
 replace_in_file "$r_helper/repros/helper-case/helper/Cargo.toml" 'publish = false' 'publish.workspace = true'
-expect_fail "path-dependency helper using publish.workspace = true without workspace" "helper/Cargo.toml: [package].publish.workspace = true used without an owning [workspace]" "$r_helper"
+expect_fail "path-dependency helper using publish.workspace = true without [workspace.package]" "helper/Cargo.toml: [package].publish.workspace = true requires [workspace.package] in $r_helper/repros/helper-case/Cargo.toml" "$r_helper"
 
-# Layout 1b: sibling version crates sharing a common path-dependency helper without its own Cargo.lock
+# Layout 1b: sibling version crates sharing a common path-dependency helper
 r_shared="$TMP_ROOT/repo-shared"
 init_temp_repo "$r_shared"
 mkdir -p "$r_shared/repros/shared-case/v55/src" "$r_shared/repros/shared-case/v56/src"
@@ -581,13 +625,28 @@ write_valid_rust_pkg "$r_shared/repros/shared-case/v55" "shared-v55" "" 'shared 
 write_valid_rust_pkg "$r_shared/repros/shared-case/v56" "shared-v56" "" 'shared = { path = "../shared" }'
 gen_lockfile "$r_shared/repros/shared-case/v55"
 gen_lockfile "$r_shared/repros/shared-case/v56"
+expect_fail "shared helper outside any workspace" "shared/Cargo.toml: path-dependency crate (used by v55/Cargo.toml, v56/Cargo.toml) is not a member of any workspace" "$r_shared"
+
+# A helper shared across roots cannot be a member of both, so it becomes its own workspace root with a Cargo.lock
+printf '\n[workspace]\n' >>"$r_shared/repros/shared-case/shared/Cargo.toml"
+expect_fail "shared helper with [workspace] but no Cargo.lock" "missing required lockfile: shared/Cargo.lock" "$r_shared"
+gen_lockfile "$r_shared/repros/shared-case/shared"
 run_check "$r_shared" >/dev/null
-pass "Sibling standalone crates sharing a path-dependency helper (without helper Cargo.lock) pass"
+pass "Sibling standalone crates sharing a helper that is its own workspace root pass"
+
+printf '// SPDX-License-Identifier: Apache-2.0\npub fn helper_val()->i32{42}\n' >"$r_shared/repros/shared-case/shared/src/lib.rs"
+expect_fail "shared helper workspace root with unformatted src/lib.rs" "shared/src/lib.rs" "$r_shared"
+write_valid_rust_lib "$r_shared/repros/shared-case/shared" "shared" $'\n[workspace]'
+
+# Standalone roots cannot inherit workspace metadata
+replace_in_file "$r_shared/repros/shared-case/v55/Cargo.toml" 'publish = false' 'publish.workspace = true'
+expect_fail "standalone root using publish.workspace = true" "v55/Cargo.toml: [package].publish.workspace = true used without an owning [workspace]" "$r_shared"
+replace_in_file "$r_shared/repros/shared-case/v55/Cargo.toml" 'publish.workspace = true' 'publish = false'
 
 replace_in_file "$r_shared/repros/shared-case/shared/Cargo.toml" 'publish = false' 'publish = true'
 expect_fail "shared path-dependency helper with publish = true" "shared/Cargo.toml: [package].publish must resolve to false (found True)" "$r_shared"
 
-# Dev-dependency cycle between root package (with Cargo.lock) and helper (without Cargo.lock)
+# Dev-dependency cycle between root package with [workspace] (with Cargo.lock) and helper (without Cargo.lock)
 r_cycle="$TMP_ROOT/repo-cycle"
 init_temp_repo "$r_cycle"
 mkdir -p "$r_cycle/repros/cycle-case/src" "$r_cycle/repros/cycle-case/helper/src"
@@ -602,6 +661,8 @@ license = "Apache-2.0"
 
 [dependencies]
 helper = { path = "helper" }
+
+[workspace]
 EOF
 cat >"$r_cycle/repros/cycle-case/src/lib.rs" <<'EOF'
 // SPDX-License-Identifier: Apache-2.0
@@ -765,19 +826,25 @@ pub fn ws_val() -> i32 {
 }
 EOF
 
-# Excluded path dependency (not a workspace member, needs explicit metadata and no Cargo.lock)
+# Excluded path dependency: not a workspace member, so it is rejected until it becomes its own workspace root
 write_valid_rust_lib "$r_wsimplicit/repros/ws-implicit/ext-helper" "ext-helper" "" "" 'pub fn ext_val() -> i32 {
     5
 }'
 
 gen_lockfile "$r_wsimplicit/repros/ws-implicit"
+expect_fail "excluded path dependency outside any workspace" "ext-helper/Cargo.toml: path-dependency crate (used by crates/a/Cargo.toml) is not a member of any workspace" "$r_wsimplicit"
+
+write_valid_rust_lib "$r_wsimplicit/repros/ws-implicit/ext-helper" "ext-helper" $'\n[workspace]' "" 'pub fn ext_val() -> i32 {
+    5
+}'
+gen_lockfile "$r_wsimplicit/repros/ws-implicit/ext-helper"
 run_check "$r_wsimplicit" --metadata-only >/dev/null
 run_check "$r_wsimplicit" >/dev/null
-pass "Workspace implicit members (direct, transitive, workspace.dependencies) and excluded path-dep pass"
+pass "Workspace implicit members (direct, transitive, workspace.dependencies) and excluded path-dep workspace root pass"
 
-# Excluded path dep cannot inherit workspace metadata
+# Excluded path dep cannot inherit the outer workspace's metadata
 replace_in_file "$r_wsimplicit/repros/ws-implicit/ext-helper/Cargo.toml" 'publish = false' 'publish.workspace = true'
-expect_fail "excluded path-dependency attempting workspace inheritance" "ext-helper/Cargo.toml: [package].publish.workspace = true used without an owning [workspace]" "$r_wsimplicit"
+expect_fail "excluded path-dependency attempting workspace inheritance" "ext-helper/Cargo.toml: [package].publish.workspace = true requires [workspace.package] in $r_wsimplicit/repros/ws-implicit/ext-helper/Cargo.toml" "$r_wsimplicit"
 replace_in_file "$r_wsimplicit/repros/ws-implicit/ext-helper/Cargo.toml" 'publish.workspace = true' 'publish = false'
 
 # Implicit workspace member rejects publish = true

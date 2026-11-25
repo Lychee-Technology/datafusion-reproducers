@@ -353,6 +353,8 @@ for wdir in sorted(workspace_roots):
                 queue.append(dep_dir)
 
 # Phase 2: classify remaining manifests into standalone roots vs. non-workspace path-dep helpers.
+# Path-dep helpers are rejected below; classifying them here lets the error name the
+# helper instead of reporting a misleading missing Cargo.lock.
 remaining = sorted(mdir for mdir in manifests if mdir not in classifications)
 remaining_set = set(remaining)
 incoming = defaultdict(set)
@@ -459,6 +461,22 @@ root_manifests = []
 for mdir in sorted(manifests):
     data = manifests[mdir]
     mpath = mdir / "Cargo.toml"
+    kind, _ = classifications[mdir]
+    if kind == "path-dep":
+        # Cargo runs fmt, clippy-driver, and tests only on workspace members, so a
+        # non-member path dependency would compile but never be linted or tested.
+        dependents = ", ".join(
+            str((d / "Cargo.toml").relative_to(case_dir)) for d in sorted(incoming[mdir])
+        )
+        print(
+            f"{mpath}: path-dependency crate (used by {dependents}) is not a member of any "
+            "workspace in the case, so cargo fmt, clippy, and test would not check it. "
+            "Add a [workspace] table to the depending root manifest so this crate becomes "
+            "a member, or give this crate its own [workspace] table and Cargo.lock",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if isinstance(data.get("package"), dict):
         publish = resolve_pkg_field(mdir, "publish")
         if publish is not False:
@@ -476,7 +494,6 @@ for mdir in sorted(manifests):
             )
             sys.exit(1)
 
-    kind, _ = classifications[mdir]
     if kind in {"standalone", "workspace"}:
         if not (mdir / "Cargo.lock").is_file():
             rel = mdir.relative_to(case_dir)

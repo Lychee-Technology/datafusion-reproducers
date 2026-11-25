@@ -559,6 +559,7 @@ gen_lockfile "$r_helper/repros/helper-case"
 # cargo fmt/clippy/test skip non-member path dependencies, so helpers outside any workspace are rejected
 expect_fail "non-member path-dependency helper of a standalone root" "helper/Cargo.toml: path-dependency crate (used by Cargo.toml) is not a member of any workspace" "$r_helper"
 expect_fail "non-member path-dependency helper rejected in --metadata-only mode" "helper/Cargo.toml: path-dependency crate (used by Cargo.toml) is not a member of any workspace" "$r_helper" --metadata-only
+expect_fail "in-directory helper remedy names the enclosing root" "Add a [workspace] table to Cargo.toml so this crate becomes an implicit member" "$r_helper"
 
 # Declaring [workspace] in the root makes in-directory helpers (and their transitive helpers) implicit members
 printf '\n[workspace]\n' >>"$r_helper/repros/helper-case/Cargo.toml"
@@ -626,6 +627,21 @@ write_valid_rust_pkg "$r_shared/repros/shared-case/v56" "shared-v56" "" 'shared 
 gen_lockfile "$r_shared/repros/shared-case/v55"
 gen_lockfile "$r_shared/repros/shared-case/v56"
 expect_fail "shared helper outside any workspace" "shared/Cargo.toml: path-dependency crate (used by v55/Cargo.toml, v56/Cargo.toml) is not a member of any workspace" "$r_shared"
+expect_fail "shared helper remedy only suggests its own workspace" "Because it is outside every root crate's directory, give this crate its own [workspace] table and Cargo.lock" "$r_shared"
+if grep -Fq "Add a [workspace] table" "$TMP_ROOT/last_err.log"; then
+    cat "$TMP_ROOT/last_err.log" >&2
+    fail "Shared helper remedy must not suggest adding [workspace] to a depending root"
+fi
+pass "Shared helper remedy omits the in-directory [workspace] suggestion"
+
+# Following the in-directory remedy on one sibling does not adopt ../shared, so the same remedy is repeated
+cp "$r_shared/repros/shared-case/v55/Cargo.toml" "$TMP_ROOT/v55_Cargo.toml.orig"
+cp "$r_shared/repros/shared-case/v55/Cargo.lock" "$TMP_ROOT/v55_Cargo.lock.orig"
+printf '\n[workspace]\n' >>"$r_shared/repros/shared-case/v55/Cargo.toml"
+gen_lockfile "$r_shared/repros/shared-case/v55"
+expect_fail "shared helper of a sibling that has [workspace]" "Because it is outside every root crate's directory, give this crate its own [workspace] table and Cargo.lock" "$r_shared"
+cp "$TMP_ROOT/v55_Cargo.toml.orig" "$r_shared/repros/shared-case/v55/Cargo.toml"
+cp "$TMP_ROOT/v55_Cargo.lock.orig" "$r_shared/repros/shared-case/v55/Cargo.lock"
 
 # A helper shared across roots cannot be a member of both, so it becomes its own workspace root with a Cargo.lock
 printf '\n[workspace]\n' >>"$r_shared/repros/shared-case/shared/Cargo.toml"
@@ -833,6 +849,7 @@ write_valid_rust_lib "$r_wsimplicit/repros/ws-implicit/ext-helper" "ext-helper" 
 
 gen_lockfile "$r_wsimplicit/repros/ws-implicit"
 expect_fail "excluded path dependency outside any workspace" "ext-helper/Cargo.toml: path-dependency crate (used by crates/a/Cargo.toml) is not a member of any workspace" "$r_wsimplicit"
+expect_fail "excluded helper remedy points at the workspace exclude list" "Remove it from [workspace].exclude in Cargo.toml, or give this crate its own [workspace] table and Cargo.lock" "$r_wsimplicit"
 
 write_valid_rust_lib "$r_wsimplicit/repros/ws-implicit/ext-helper" "ext-helper" $'\n[workspace]' "" 'pub fn ext_val() -> i32 {
     5

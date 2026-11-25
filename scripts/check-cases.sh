@@ -457,6 +457,28 @@ def has_toolchain_in_ancestors(mdir: Path) -> bool:
     return False
 
 
+def helper_remedy(mdir: Path) -> str:
+    # Only suggest a remedy that makes this helper a checked crate for its actual layout:
+    # an enclosing root's [workspace] adopts a helper only if the helper lives in that
+    # root's directory, is not excluded, and is not also used from outside it.
+    own_ws = "give this crate its own [workspace] table and Cargo.lock"
+    enclosing = [r for r in standalone_roots | workspace_roots if r in mdir.parents]
+    if not enclosing:
+        return f"Because it is outside every root crate's directory, {own_ws}"
+    nearest = max(enclosing, key=lambda p: len(p.parts))
+    rel_root = nearest.relative_to(case_dir) / "Cargo.toml"
+    if nearest in workspace_roots:
+        if is_excluded(mdir, nearest):
+            return f"Remove it from [workspace].exclude in {rel_root}, or {own_ws}"
+        return f"Add it to [workspace].members in {rel_root}, or {own_ws}"
+    if any(d != nearest and nearest not in d.parents for d in incoming[mdir]):
+        return f"Because it is also used from outside {nearest.relative_to(case_dir)}/, {own_ws}"
+    return (
+        f"Add a [workspace] table to {rel_root} so this crate becomes an implicit member, "
+        f"or {own_ws}"
+    )
+
+
 root_manifests = []
 for mdir in sorted(manifests):
     data = manifests[mdir]
@@ -471,8 +493,7 @@ for mdir in sorted(manifests):
         print(
             f"{mpath}: path-dependency crate (used by {dependents}) is not a member of any "
             "workspace in the case, so cargo fmt, clippy, and test would not check it. "
-            "Add a [workspace] table to the depending root manifest so this crate becomes "
-            "a member, or give this crate its own [workspace] table and Cargo.lock",
+            f"{helper_remedy(mdir)}",
             file=sys.stderr,
         )
         sys.exit(1)

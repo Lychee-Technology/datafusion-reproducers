@@ -169,6 +169,32 @@ fn every_physical_rule_is_timed_in_order() {
 }
 
 #[test]
+fn timing_shim_leaves_the_physical_plan_unchanged() {
+    use deep_expression_planning::datafusion::physical_plan::displayable;
+    for mode in Mode::ALL {
+        for input in [Input::Sorted, Input::Unsorted] {
+            let w = workload(mode, input);
+            let (planned, _) = planned(&w);
+            let plain = block_on(async {
+                context(&w)?
+                    .sql(&w.sql())
+                    .await?
+                    .create_physical_plan()
+                    .await
+            })
+            .expect("plain planning succeeds");
+            assert_eq!(
+                displayable(planned.physical.as_ref())
+                    .indent(true)
+                    .to_string(),
+                displayable(plain.as_ref()).indent(true).to_string(),
+                "{mode:?}/{input:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn query_returns_the_expected_rows_when_executed() {
     // Executed outside any timed path: checks that the SQL means what the
     // README says.

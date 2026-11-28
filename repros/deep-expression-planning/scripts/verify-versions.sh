@@ -7,14 +7,16 @@
 # a timeout is recorded as status `timeout`, never as a time.
 #
 # Usage: scripts/verify-versions.sh [OUTPUT_CSV]
-#   default output: results/verification.csv (relative to the case directory)
+#   OUTPUT_CSV is relative to the caller's working directory;
+#   default output: results/verification.csv in the case directory
 
 set -euo pipefail
 
 case_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$case_dir"
-out="${1:-results/verification.csv}"
+out="${1:-$case_dir/results/verification.csv}"
 mkdir -p "$(dirname "$out")"
+out="$(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
+cd "$case_dir"
 
 declare -A bins=(
     [df55]="target/df55/release/deep-expression-planning"
@@ -44,10 +46,13 @@ run() {
         exit 1
     fi
     if [[ "$header_written" == false ]]; then
-        printf '%s\n' "$rows" | head -n 1 >"$out"
+        printf '%s\n' "${rows%%$'\n'*}" >"$out"
         header_written=true
     fi
-    printf '%s\n' "$rows" | tail -n +2 >>"$out"
+    # Everything after the header line; no pipe, so pipefail cannot trip.
+    if [[ "$rows" == *$'\n'* ]]; then
+        printf '%s\n' "${rows#*$'\n'}" >>"$out"
+    fi
 }
 
 for feature in df55 df56; do

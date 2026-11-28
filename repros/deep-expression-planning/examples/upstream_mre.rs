@@ -61,9 +61,13 @@ async fn run(depth: usize) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let depth = std::env::args()
+    let depth: usize = std::env::args()
         .nth(1)
-        .map(|d| d.parse().expect("depth must be a positive integer"))
+        .map(|d| {
+            d.parse::<std::num::NonZeroUsize>()
+                .expect("depth must be a positive integer")
+                .get()
+        })
         .unwrap_or(100);
     // Planning recurses once per expression level.
     std::thread::Builder::new()

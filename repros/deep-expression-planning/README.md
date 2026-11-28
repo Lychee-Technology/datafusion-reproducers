@@ -147,40 +147,40 @@ Results from different machines, or from debug builds, are not comparable to the
 
 ## Verified Results
 
-`planning_total` (parse through physical planning, setup excluded) in ms: median [min–max] of 3 release-build runs after 1 warmup. Raw samples, every stage and every physical rule: [`results/verification.csv`](results/verification.csv). Machine, revisions and protocol: [`results/environment.md`](results/environment.md). Produced by `scripts/verify-versions.sh` at reproducer commit `ff84687`.
+`planning_total` (parse through physical planning, setup excluded) in ms: median [min–max] of 3 release-build runs after 1 warmup. Raw samples, every stage and every physical rule: [`results/verification.csv`](results/verification.csv). Machine, revisions and protocol: [`results/environment.md`](results/environment.md). Produced by `scripts/verify-versions.sh` at reproducer commit `beac66b`.
 
 Reported workload (`--mode distinct`, 2 partitions):
 
 | Depth | Input | 55.0.0 | 56.0.0 | 56 / 55 |
 |---|---|---|---|---|
-| 25 | sorted | 2.5 [2.5–2.7] | 16.7 [16.6–17.2] | 7× |
-| 50 | sorted | 7.0 [6.9–7.1] | 158.4 [157.8–158.8] | 23× |
-| 100 | sorted | 22.8 [22.8–22.9] | 1904.5 [1867.8–2364.4] | 84× |
-| 200 | sorted | 85.8 [85.1–87.3] | 24422.0 [24389.7–24425.0] | 285× |
-| 500 | sorted | 491.8 (1 run) | timeout (> 120 s, 1 run) | — |
-| 25 | unsorted | 2.4 [2.4–2.5] | 4.8 [4.8–4.9] | 2× |
-| 50 | unsorted | 6.8 [6.7–6.9] | 34.6 [33.2–35.2] | 5× |
-| 100 | unsorted | 22.7 [22.6–22.9] | 356.2 [347.3–373.2] | 16× |
-| 200 | unsorted | 81.6 [81.4–82.2] | 4328.5 [4313.0–4359.0] | 53× |
+| 25 | sorted | 1.9 [1.9–1.9] | 16.3 [16.3–16.6] | 9× |
+| 50 | sorted | 4.7 [4.7–4.9] | 166.2 [158.9–166.3] | 35× |
+| 100 | sorted | 15.0 [14.9–15.2] | 1875.8 [1864.4–1879.8] | 125× |
+| 200 | sorted | 52.6 [52.3–52.9] | 24023.9 [23989.8–24084.5] | 457× |
+| 500 | sorted | 309.9 (1 run) | timeout (> 120 s, 1 run) | — |
+| 25 | unsorted | 1.8 [1.7–1.8] | 4.4 [4.4–4.4] | 2× |
+| 50 | unsorted | 4.7 [4.7–4.7] | 31.9 [31.7–31.9] | 7× |
+| 100 | unsorted | 14.8 [14.7–15.0] | 341.3 [337.6–379.3] | 23× |
+| 200 | unsorted | 53.0 [51.5–53.2] | 4190.4 [4188.1–4218.8] | 79× |
 
 Controls at depth 100, sorted input unless stated:
 
 | Workload | 55.0.0 | 56.0.0 |
 |---|---|---|
-| `--mode group-by` (`GROUP BY a, b, s1`) | 21.6 | 1878.5 |
-| `--mode order-by` (`ORDER BY s1`, `a` and `b` projected) | 22.6 | 1072.6 |
-| `--mode project` (no sort or grouping) | 22.2 | 19.1 |
-| `--key-only` (`DISTINCT s1` alone) | 22.6 | 18.2 |
-| `--partitions 1` | 22.8 | 1474.9 |
-| `--partitions 8` | 22.6 | 1866.7 |
-| `--depth 25 --projections 4 --retain` (four separate 25-level projections) | 8.4 | 131.1 |
+| `--mode group-by` (`GROUP BY a, b, s1`) | 13.7 | 1853.4 |
+| `--mode order-by` (`ORDER BY s1`, `a` and `b` projected) | 14.6 | 1054.1 |
+| `--mode project` (no sort or grouping) | 14.4 | 11.9 |
+| `--key-only` (`DISTINCT s1` alone) | 14.9 | 10.5 |
+| `--partitions 1` | 14.9 | 1455.2 |
+| `--partitions 8` | 15.0 | 1853.6 |
+| `--depth 25 --projections 4 --retain` (four separate 25-level projections) | 6.0 | 126.8 |
 
 What this shows:
 
-- **The reported regression reproduces.** At depth 200 the sorted `distinct` plans in 86 ms on 55.0.0 and 24.4 s on 56.0.0, and depth 500 does not finish within 120 s on 56.0.0 while 55.0.0 takes 0.49 s. LTSeq's end-to-end ratio (0.44 s vs 88 s, about 200×) is of the same order. Its absolute times differ, as expected from 8 partitions, an explicit sort and execution on that machine.
-- **Growth.** On 56.0.0 each doubling of depth multiplies the sorted time by 9.5, 12 and 12.8, an empirical exponent of about 3.3–3.7 between depths 25 and 200. On 55.0.0 the factors are 2.8, 3.3 and 3.8, so 55 also grows faster than linearly, but much more slowly. These are fits to four points, not a complexity bound.
-- **Where the time goes.** On 56.0.0 nearly all of it is physical planning. At depth 100 sorted (medians), `EnsureRequirements` takes about 1.05 s, `OptimizeAggregateOrder` 0.20 s, and the work outside rules (initial plan and checks) 0.64 s.
-- **What triggers it.** Grouping or ordering on the computed column while its source column `a` is also in the output: `--key-only` and `--mode project` plan as fast as on 55. A declared ordering on `a` makes it about 5× worse, but the unsorted input is also affected. The partition count changes the time only moderately. The cost follows the depth of a single expression, not the depth of the plan: four separately retained 25-level projections cost far less than one 100-level expression.
+- **The reported regression reproduces.** At depth 200 the sorted `distinct` plans in 53 ms on 55.0.0 and 24.0 s on 56.0.0, and depth 500 does not finish within 120 s on 56.0.0 while 55.0.0 takes 0.31 s. LTSeq's end-to-end ratio (0.44 s vs 88 s, about 200×) is of the same order. LTSeq's times include execution, an explicit sort and 8 partitions on another machine, so neither the absolute times nor the ratio are expected to match.
+- **Growth.** On 56.0.0 each doubling of depth multiplies the sorted time by 10.2, 11.3 and 12.8, an empirical exponent of about 3.3–3.7 between depths 25 and 200. On 55.0.0 the factors are 2.5, 3.2 and 3.5, so 55 also grows faster than linearly, but much more slowly. These are fits to four points, not a complexity bound.
+- **Where the time goes.** On 56.0.0 nearly all of it is physical planning. At depth 100 sorted (medians), `EnsureRequirements` takes about 1.04 s, `OptimizeAggregateOrder` 0.20 s, and the work outside rules (initial plan and checks) 0.63 s. On 55.0.0 the whole physical stage takes 1.0 ms, and logical optimization (11.2 ms) dominates.
+- **What triggers it.** Grouping or ordering on the computed column while its source column `a` is also in the output: `--key-only` and `--mode project` plan as fast on 56.0.0 as on 55.0.0, or faster. A declared ordering on `a` makes it about 5× worse, but the unsorted input is also affected. The partition count changes the time only moderately. The cost follows the depth of a single expression, not the depth of the plan: four separately retained 25-level projections cost far less than one 100-level expression.
 
 ## Investigation Status
 

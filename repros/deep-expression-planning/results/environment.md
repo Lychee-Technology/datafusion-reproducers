@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| Reproducer commit | `ff8468709674d794564f261e05513522cdfcd378` (clean tree for all built sources) |
+| Reproducer commit | `beac66b8acac78a1f224514c8193bc79333994a6` (clean tree for all built sources) |
 | Command | `scripts/verify-versions.sh` from `repros/deep-expression-planning` |
 | DataFusion 55 | crates.io `55.0.0`, all 31 `datafusion*` crates at 55.0.0 (tag commit `d5552342012888b7d1a3ab88d92e3d292fc0cde0`) |
 | DataFusion 56 | crates.io `56.0.0`, all 31 `datafusion*` crates at 56.0.0 (tag commit `7e7ae72a820e2bf87da1205b96639fba334ed2f7`) |

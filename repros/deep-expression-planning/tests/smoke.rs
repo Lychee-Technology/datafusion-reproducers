@@ -7,7 +7,7 @@ use std::process::Command;
 
 use deep_expression_planning::datafusion::arrow::array::{Array, Int64Array};
 use deep_expression_planning::datafusion::arrow::compute::concat_batches;
-use deep_expression_planning::{Input, Mode, PlanShape, Planned, Workload, context, plan};
+use deep_expression_planning::{Input, Mode, PlanShape, Planned, Workload, context, plan, plan_in};
 
 // Shallow enough for a 2 MiB debug test thread.
 const DEPTH: usize = 8;
@@ -166,6 +166,44 @@ fn every_physical_rule_is_timed_in_order() {
         .collect();
     let timed: Vec<String> = planned.rules.iter().map(|(n, _)| n.clone()).collect();
     assert_eq!(timed, expected);
+}
+
+#[test]
+fn logical_optimization_runs_once_per_planning_run() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use deep_expression_planning::datafusion::config::ConfigOptions;
+    use deep_expression_planning::datafusion::error::Result;
+    use deep_expression_planning::datafusion::logical_expr::LogicalPlan;
+    use deep_expression_planning::datafusion::optimizer::AnalyzerRule;
+
+    // The analyzer runs each of its rules once per `SessionState::optimize`
+    // call, so this counts logical optimization passes.
+    #[derive(Debug, Default)]
+    struct Count(AtomicUsize);
+    impl AnalyzerRule for Count {
+        fn analyze(&self, plan: LogicalPlan, _: &ConfigOptions) -> Result<LogicalPlan> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(plan)
+        }
+        fn name(&self) -> &str {
+            "count_analyzer_runs"
+        }
+    }
+
+    for mode in Mode::ALL {
+        let w = workload(mode, Input::Sorted);
+        let count = Arc::new(Count::default());
+        let rule = Arc::clone(&count);
+        block_on(plan_in(&w, move |w| {
+            let ctx = context(w)?;
+            ctx.add_analyzer_rule(rule);
+            Ok(ctx)
+        }))
+        .expect("planning succeeds");
+        assert_eq!(count.0.load(Ordering::SeqCst), 1, "{mode:?}");
+    }
 }
 
 #[test]

@@ -247,8 +247,10 @@ pub enum Stage {
     SqlToLogical,
     /// Analyzer and logical optimizer rules (`SessionState::optimize`).
     LogicalOptimize,
-    /// `SessionState::create_physical_plan`: the initial physical plan, every
-    /// physical optimizer rule, and the planner's invariant and sanity checks.
+    /// `QueryPlanner::create_physical_plan` on the optimized logical plan:
+    /// the initial physical plan, every physical optimizer rule, and the
+    /// planner's invariant and sanity checks. Logical optimization is not
+    /// repeated here.
     PhysicalPlan,
 }
 
@@ -344,16 +346,28 @@ impl PhysicalOptimizerRule for Timed {
 
 /// Plan `workload` once, timing each stage. Nothing is executed.
 ///
-/// Physical planning is one call to `SessionState::create_physical_plan`,
-/// as `DataFrame::create_physical_plan` makes it. The session's default
-/// physical optimizer rules are each wrapped in [`Timed`], in their default
-/// order, to attribute that stage's time to rules.
+/// `DataFrame::create_physical_plan` calls `SessionState::create_physical_plan`,
+/// which runs `SessionState::optimize` and then the session's query planner.
+/// Here the two halves are timed as separate stages, so each runs exactly
+/// once: [`Stage::LogicalOptimize`] calls `optimize`, and
+/// [`Stage::PhysicalPlan`] calls the query planner on its result. The
+/// session's default physical optimizer rules are each wrapped in [`Timed`],
+/// in their default order, to attribute the physical stage's time to rules.
 pub async fn plan(workload: &Workload) -> Result<Planned> {
+    plan_in(workload, context).await
+}
+
+/// [`plan`], with the session built by `make_context` instead of
+/// [`context`]. Building it is timed as [`Stage::Setup`].
+pub async fn plan_in(
+    workload: &Workload,
+    make_context: impl FnOnce(&Workload) -> Result<SessionContext>,
+) -> Result<Planned> {
     let mut stages = Vec::with_capacity(Stage::ALL.len());
     let sql = workload.sql();
 
     let start = Instant::now();
-    let ctx = context(workload)?;
+    let ctx = make_context(workload)?;
     let log = RuleLog::default();
     let timed_rules = ctx
         .state()
@@ -385,7 +399,12 @@ pub async fn plan(workload: &Workload) -> Result<Planned> {
     stages.push((Stage::LogicalOptimize, start.elapsed()));
 
     let start = Instant::now();
-    let physical = state.create_physical_plan(&logical).await?;
+    // Not `SessionState::create_physical_plan`, which would optimize the
+    // logical plan a second time inside this stage.
+    let physical = state
+        .query_planner()
+        .create_physical_plan(&logical, &state)
+        .await?;
     stages.push((Stage::PhysicalPlan, start.elapsed()));
 
     let rules = log

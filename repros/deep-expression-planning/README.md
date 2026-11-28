@@ -139,9 +139,9 @@ The timed path is `plan()` in [`src/lib.rs`](src/lib.rs). For each run it builds
 | `parse` | `SessionState::sql_to_statement` |
 | `sql_to_logical` | `SessionState::statement_to_plan` |
 | `logical_optimize` | `SessionState::optimize` (analyzer and optimizer rules) |
-| `physical_plan` | `SessionState::create_physical_plan`: initial plan, physical optimizer rules, planner checks |
+| `physical_plan` | `SessionState::query_planner().create_physical_plan` on the optimized plan: initial plan, physical optimizer rules, planner checks |
 
-Each default physical optimizer rule is wrapped, in its default order, in a shim that times the call and keeps the rule's name and schema check, so `physical_plan` is also broken down by rule. The text output derives "outside rules" as `physical_plan` minus the rule times; that remainder is the initial plan and the planner's invariant and sanity checks, which the public API does not let us time apart on 56. `planning_total` is the sum of the four stages. Nothing is executed on the timed path; one smoke test executes the query separately to check that the SQL means what this README says.
+`DataFrame::create_physical_plan` goes through `SessionState::create_physical_plan`, which is `optimize` followed by the query planner. The two halves are timed as separate stages, so logical optimization runs once per run and is not billed to `physical_plan`; a smoke test counts the passes. Each default physical optimizer rule is wrapped, in its default order, in a shim that times the call and keeps the rule's name and schema check, so `physical_plan` is also broken down by rule. The text output derives "outside rules" as `physical_plan` minus the rule times; that remainder is the initial plan and the planner's invariant and sanity checks, which the public API does not let us time apart on 56. `planning_total` is the sum of the four stages. Nothing is executed on the timed path; one smoke test executes the query separately to check that the SQL means what this README says.
 
 Results from different machines, or from debug builds, are not comparable to the numbers below.
 
